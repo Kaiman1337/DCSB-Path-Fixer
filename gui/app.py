@@ -4,27 +4,30 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from core import DCSBPathFixerService, SettingsManager, SUPPORTED_AUDIO_EXTENSIONS, HistoryManager
-from errors import (
-    ConfigReadError,
-    ConfigWriteError,
-    HistoryError,
-    SettingsError,
-    ValidationError,
-)
+from core import DCSBPathFixerService, HistoryManager, SettingsManager
+from errors import ConfigReadError, ConfigWriteError, HistoryError, SettingsError, ValidationError
+from gui.constants import SUPPORTED_FORMATS_TEXT, VALID_RENAME_MODES
+from gui.dialogs import open_create_checkpoint_dialog, open_rename_checkpoint_dialog
+from gui.theme import DARK_BG, DARK_FG, setup_dark_theme
 
-VALID_RENAME_MODES = {"none", "-", "_", "space"}
-SUPPORTED_FORMATS_TEXT = ", ".join(sorted(f"*{ext}" for ext in SUPPORTED_AUDIO_EXTENSIONS))
+from gui.flac_converter_tab import FlacConverterTab
+from gui.playlist_tab import PlaylistTab
 
 
 class DCSBPathFixerApp:
+    VIEW_SIZES = {
+        "path_fixer": "1040x760",
+        "playlist": "900x700",
+        "flac_converter": "900x620",
+    }
+
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("DCSB Config Path Fixer")
-        self.root.geometry("1040x760")
-        self.root.minsize(920, 660)
+        self.root.geometry(self.VIEW_SIZES["path_fixer"])
+        self.root.resizable(False, False)
 
-        self._setup_dark_theme()
+        setup_dark_theme(self.root)
 
         self.service = DCSBPathFixerService()
         self.settings = SettingsManager()
@@ -37,32 +40,76 @@ class DCSBPathFixerApp:
         self.status_text = tk.StringVar(value="Ready.")
         self.progress_value = tk.DoubleVar(value=0.0)
         self.selected_history_index = tk.IntVar(value=-1)
+        self.use_config = tk.BooleanVar(value=True)
+        self.active_view = tk.StringVar(value="path_fixer")
 
         self.log_widget: tk.Text
         self.history_listbox: tk.Listbox
         self.history_details_widget: tk.Text
         self.missing_widget: tk.Text
 
+        self.path_fixer_view: ttk.Frame
+        self.playlist_host_view: ttk.Frame
+        self.flac_host_view: ttk.Frame
+
+        self.playlist_tab: PlaylistTab | None = None
+        self.flac_converter_tab: FlacConverterTab | None = None
+
         self._build_ui()
         self._load_settings_into_ui()
         self._bind_events()
-
-    def _setup_dark_theme(self) -> None:
-        style = ttk.Style()
-        bg_color = "#2b2b2b"
-        fg_color = "#ffffff"
-
-        style.configure("TLabel", foreground=fg_color)
-        style.configure("TLabelframe", foreground=fg_color)
-        style.configure("TLabelframe.Label", foreground=fg_color)
-        style.configure("TButton", foreground=fg_color)
-        style.configure("TRadiobutton", foreground=fg_color)
-        style.configure("TCheckbutton", foreground=fg_color)
-
-        self.root.configure(bg=bg_color)
+        self._show_view("path_fixer")
 
     def _build_ui(self) -> None:
-        container = ttk.Frame(self.root, padding=12)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
+
+        top_tabs_frame = ttk.Frame(self.root, padding=(12, 10, 12, 0))
+        top_tabs_frame.grid(row=0, column=0, sticky="ew")
+        top_tabs_frame.columnconfigure(0, weight=1)
+        top_tabs_frame.columnconfigure(1, weight=1)
+        top_tabs_frame.columnconfigure(2, weight=1)
+
+        self.path_fixer_tab_button = ttk.Button(
+            top_tabs_frame,
+            text="Path Fixer",
+            command=lambda: self._show_view("path_fixer"),
+        )
+        self.path_fixer_tab_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+
+        self.playlist_tab_button = ttk.Button(
+            top_tabs_frame,
+            text="Playlist Builder",
+            command=lambda: self._show_view("playlist"),
+        )
+        self.playlist_tab_button.grid(row=0, column=1, sticky="ew", padx=4)
+
+        self.flac_tab_button = ttk.Button(
+            top_tabs_frame,
+            text="FLAC -> MP3",
+            command=lambda: self._show_view("flac_converter"),
+        )
+        self.flac_tab_button.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+
+        view_host = ttk.Frame(self.root)
+        view_host.grid(row=1, column=0, sticky="nsew")
+        view_host.columnconfigure(0, weight=1)
+        view_host.rowconfigure(0, weight=1)
+
+        self.path_fixer_view = ttk.Frame(view_host)
+        self.playlist_host_view = ttk.Frame(view_host)
+        self.flac_host_view = ttk.Frame(view_host)
+
+        for frame in (self.path_fixer_view, self.playlist_host_view, self.flac_host_view):
+            frame.grid(row=0, column=0, sticky="nsew")
+            frame.grid_remove()
+
+        self._build_path_fixer_view()
+        self._build_playlist_view()
+        self._build_flac_view()
+
+    def _build_path_fixer_view(self) -> None:
+        container = ttk.Frame(self.path_fixer_view, padding=12)
         container.pack(fill="both", expand=True)
 
         ttk.Label(container, text="Audio library folder:").grid(row=0, column=0, sticky="w", pady=(0, 6))
@@ -71,11 +118,18 @@ class DCSBPathFixerApp:
         )
         ttk.Button(container, text="Browse...", command=self._browse_library).grid(row=0, column=2, pady=(0, 6))
 
-        ttk.Label(container, text="DCSB config.xml file:").grid(row=1, column=0, sticky="w", pady=(0, 6))
-        ttk.Entry(container, textvariable=self.config_path, width=100).grid(
-            row=1, column=1, sticky="ew", padx=8, pady=(0, 6)
-        )
-        ttk.Button(container, text="Browse...", command=self._browse_config).grid(row=1, column=2, pady=(0, 6))
+        ttk.Checkbutton(
+            container,
+            text="Update DCSB config.xml",
+            variable=self.use_config,
+            command=self._toggle_config_field,
+        ).grid(row=1, column=0, sticky="w", pady=(0, 6))
+
+        self.config_entry = ttk.Entry(container, textvariable=self.config_path, width=100)
+        self.config_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=(0, 6))
+
+        self.config_browse_btn = ttk.Button(container, text="Browse...", command=self._browse_config)
+        self.config_browse_btn.grid(row=1, column=2, pady=(0, 6))
 
         info_frame = ttk.LabelFrame(container, text="Supported audio formats", padding=8)
         info_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 10))
@@ -85,9 +139,9 @@ class DCSBPathFixerApp:
             height=2,
             width=100,
             wrap="word",
-            bg="#2b2b2b",
-            fg="#ffffff",
-            insertbackground="#ffffff",
+            bg=DARK_BG,
+            fg=DARK_FG,
+            insertbackground=DARK_FG,
         )
         info_text.insert("1.0", SUPPORTED_FORMATS_TEXT)
         info_text.config(state="disabled")
@@ -104,17 +158,10 @@ class DCSBPathFixerApp:
         ]
 
         for text, value in rename_options:
-            ttk.Radiobutton(
-                rename_frame,
-                text=text,
-                variable=self.rename_mode,
-                value=value,
-            ).pack(anchor="w")
+            ttk.Radiobutton(rename_frame, text=text, variable=self.rename_mode, value=value).pack(anchor="w")
 
         ttk.Checkbutton(
-            rename_frame,
-            text="Convert filenames to lowercase",
-            variable=self.use_lowercase,
+            rename_frame, text="Convert filenames to lowercase", variable=self.use_lowercase
         ).pack(anchor="w", pady=(8, 0))
 
         button_frame = ttk.Frame(container)
@@ -133,9 +180,9 @@ class DCSBPathFixerApp:
             log_frame,
             height=16,
             wrap="word",
-            bg="#2b2b2b",
-            fg="#ffffff",
-            insertbackground="#ffffff",
+            bg=DARK_BG,
+            fg=DARK_FG,
+            insertbackground=DARK_FG,
         )
         self.log_widget.pack(fill="both", expand=True)
 
@@ -152,10 +199,10 @@ class DCSBPathFixerApp:
             history_list_frame,
             yscrollcommand=scrollbar.set,
             height=16,
-            bg="#2b2b2b",
-            fg="#ffffff",
+            bg=DARK_BG,
+            fg=DARK_FG,
             selectbackground="#505050",
-            selectforeground="#ffffff",
+            selectforeground=DARK_FG,
         )
         self.history_listbox.pack(fill="both", expand=True)
         scrollbar.config(command=self.history_listbox.yview)
@@ -169,9 +216,9 @@ class DCSBPathFixerApp:
             height=16,
             wrap="word",
             width=40,
-            bg="#2b2b2b",
-            fg="#ffffff",
-            insertbackground="#ffffff",
+            bg=DARK_BG,
+            fg=DARK_FG,
+            insertbackground=DARK_FG,
         )
         self.history_details_widget.pack(fill="both", expand=True)
 
@@ -190,9 +237,9 @@ class DCSBPathFixerApp:
             container,
             height=8,
             wrap="word",
-            bg="#2b2b2b",
-            fg="#ffffff",
-            insertbackground="#ffffff",
+            bg=DARK_BG,
+            fg=DARK_FG,
+            insertbackground=DARK_FG,
         )
         self.missing_widget.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(4, 8))
 
@@ -200,8 +247,9 @@ class DCSBPathFixerApp:
         status_frame.grid(row=8, column=0, columnspan=3, sticky="ew")
         status_frame.columnconfigure(1, weight=1)
 
-        status_label = ttk.Label(status_frame, textvariable=self.status_text, relief="sunken", anchor="w")
-        status_label.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Label(status_frame, textvariable=self.status_text, relief="sunken", anchor="w").grid(
+            row=0, column=0, sticky="ew", padx=(0, 8)
+        )
 
         progress_bar = ttk.Progressbar(
             status_frame,
@@ -214,6 +262,70 @@ class DCSBPathFixerApp:
         container.columnconfigure(1, weight=1)
         container.rowconfigure(5, weight=1)
         container.rowconfigure(7, weight=0)
+
+    def _build_playlist_view(self) -> None:
+        self.playlist_host_view.columnconfigure(0, weight=1)
+        self.playlist_host_view.rowconfigure(0, weight=1)
+
+        self.playlist_tab = PlaylistTab(
+            self.playlist_host_view,
+            status_callback=lambda text: self.status_text.set(text),
+            progress_callback=self._progress_callback,
+        )
+        self.playlist_tab.frame.grid(row=0, column=0, sticky="nsew")
+
+    def _build_flac_view(self) -> None:
+        self.flac_host_view.columnconfigure(0, weight=1)
+        self.flac_host_view.rowconfigure(0, weight=1)
+
+        self.flac_converter_tab = FlacConverterTab(
+            self.flac_host_view,
+            status_callback=lambda text: self.status_text.set(text),
+            progress_callback=self._progress_callback,
+        )
+        self.flac_converter_tab.frame.grid(row=0, column=0, sticky="nsew")
+
+    def _show_view(self, view_name: str) -> None:
+        self.active_view.set(view_name)
+
+        self.path_fixer_view.grid_remove()
+        self.playlist_host_view.grid_remove()
+        self.flac_host_view.grid_remove()
+
+        if view_name == "path_fixer":
+            self.path_fixer_view.grid()
+            self.root.title("DCSB Config Path Fixer")
+        elif view_name == "playlist":
+            self.playlist_host_view.grid()
+            self.root.title("Playlist Builder")
+        elif view_name == "flac_converter":
+            self.flac_host_view.grid()
+            self.root.title("FLAC -> MP3")
+        else:
+            return
+
+        self.root.geometry(self.VIEW_SIZES.get(view_name, self.VIEW_SIZES["path_fixer"]))
+        self.root.resizable(False, False)
+        self._update_tab_button_states()
+
+    def _update_tab_button_states(self) -> None:
+        active = self.active_view.get()
+
+        self.path_fixer_tab_button.state(["!disabled"])
+        self.playlist_tab_button.state(["!disabled"])
+        self.flac_tab_button.state(["!disabled"])
+
+        if active == "path_fixer":
+            self.path_fixer_tab_button.state(["disabled"])
+        elif active == "playlist":
+            self.playlist_tab_button.state(["disabled"])
+        elif active == "flac_converter":
+            self.flac_tab_button.state(["disabled"])
+
+    def _toggle_config_field(self) -> None:
+        state = "normal" if self.use_config.get() else "disabled"
+        self.config_entry.config(state=state)
+        self.config_browse_btn.config(state=state)
 
     def _bind_events(self) -> None:
         self.library_path.trace_add("write", self._persist_settings)
@@ -232,6 +344,7 @@ class DCSBPathFixerApp:
 
         saved_mode = settings.get("rename_mode", "none")
         self.rename_mode.set(saved_mode if saved_mode in VALID_RENAME_MODES else "none")
+        self._toggle_config_field()
 
     def _persist_settings(self, *_args) -> None:
         try:
@@ -239,11 +352,7 @@ class DCSBPathFixerApp:
             if rename_mode not in VALID_RENAME_MODES:
                 rename_mode = "none"
 
-            self.settings.save(
-                self.library_path.get(),
-                self.config_path.get(),
-                rename_mode,
-            )
+            self.settings.save(self.library_path.get(), self.config_path.get(), rename_mode)
         except SettingsError:
             pass
 
@@ -345,7 +454,7 @@ class DCSBPathFixerApp:
         entry_type = entry.get("type", "unknown")
 
         details = f"Entry #{index}\n"
-        details += f"━━━━━━━━━━━━━━━━━━━━\n"
+        details += "━━━━━━━━━━━━━━━━━━━━\n"
         details += f"Timestamp: {entry.get('timestamp', 'N/A')}\n"
 
         if entry_type == "checkpoint":
@@ -394,10 +503,7 @@ class DCSBPathFixerApp:
             self.progress_value.set(0)
 
             try:
-                result = self.service.revert_to_history_point(
-                    history_index,
-                    progress_callback=self._progress_callback,
-                )
+                result = self.service.revert_to_history_point(history_index, progress_callback=self._progress_callback)
                 self._set_log(result.log_lines)
                 self._refresh_history()
                 self.progress_value.set(100)
@@ -412,43 +518,11 @@ class DCSBPathFixerApp:
                 messagebox.showerror("Revert Error", str(exc))
 
     def _create_checkpoint(self) -> None:
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Create Checkpoint")
-        dialog.geometry("400x150")
-        dialog.transient(self.root)
-        dialog.grab_set()
+        def on_success(label: str) -> None:
+            self._refresh_history()
+            self.status_text.set(f"Checkpoint created: {label}")
 
-        ttk.Label(dialog, text="Checkpoint Label:").pack(padx=10, pady=(10, 0), anchor="w")
-        label_entry = ttk.Entry(dialog, width=45)
-        label_entry.pack(padx=10, pady=5, fill="x")
-        label_entry.focus()
-
-        def create() -> None:
-            label = label_entry.get().strip()
-            if not label:
-                messagebox.showwarning("Empty Label", "Please enter a checkpoint label.")
-                return
-
-            try:
-                library_dir = self.library_path.get().strip()
-                self.history_manager.add_checkpoint(label, library_dir)
-                self._refresh_history()
-                dialog.destroy()
-                self.status_text.set(f"Checkpoint created: {label}")
-                messagebox.showinfo("Success", f"Checkpoint '{label}' created successfully.")
-            except HistoryError as exc:
-                self.status_text.set("History error.")
-                messagebox.showerror("History Error", str(exc))
-
-        def on_enter(_event) -> None:
-            create()
-
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="Create", command=create).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side="left", padx=5)
-
-        label_entry.bind("<Return>", on_enter)
+        open_create_checkpoint_dialog(self.root, self.history_manager, self.library_path.get, on_success)
 
     def _delete_history_entry(self) -> None:
         history_index = self.selected_history_index.get()
@@ -506,45 +580,11 @@ class DCSBPathFixerApp:
 
         current_label = entry.get("label", "Untitled")
 
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Rename Checkpoint")
-        dialog.geometry("400x150")
-        dialog.transient(self.root)
-        dialog.grab_set()
+        def on_success(new_label: str) -> None:
+            self._refresh_history()
+            self.status_text.set(f"Checkpoint renamed to: {new_label}")
 
-        ttk.Label(dialog, text="New Checkpoint Label:").pack(padx=10, pady=(10, 0), anchor="w")
-        label_entry = ttk.Entry(dialog, width=45)
-        label_entry.insert(0, current_label)
-        label_entry.pack(padx=10, pady=5, fill="x")
-        label_entry.focus()
-        label_entry.select_range(0, tk.END)
-
-        def rename() -> None:
-            new_label = label_entry.get().strip()
-            if not new_label:
-                messagebox.showwarning("Empty Label", "Please enter a checkpoint label.")
-                return
-
-            try:
-                if self.history_manager.rename_checkpoint(history_index, new_label):
-                    self._refresh_history()
-                    dialog.destroy()
-                    self.status_text.set(f"Checkpoint renamed to: {new_label}")
-                    messagebox.showinfo("Success", f"Checkpoint renamed to '{new_label}'.")
-                else:
-                    messagebox.showerror("Error", "Failed to rename checkpoint.")
-            except HistoryError as exc:
-                messagebox.showerror("History Error", str(exc))
-
-        def on_enter(_event) -> None:
-            rename()
-
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="Rename", command=rename).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side="left", padx=5)
-
-        label_entry.bind("<Return>", on_enter)
+        open_rename_checkpoint_dialog(self.root, self.history_manager, history_index, current_label, on_success)
 
     def _run(self) -> None:
         library_dir = self.library_path.get().strip()
@@ -563,13 +603,21 @@ class DCSBPathFixerApp:
         try:
             self._persist_settings()
 
-            result = self.service.repair_config(
-                library_dir=library_dir,
-                config_file=config_file,
-                rename_mode=rename_mode,
-                use_lowercase=use_lowercase,
-                progress_callback=self._progress_callback,
-            )
+            if self.use_config.get():
+                result = self.service.repair_config(
+                    library_dir=library_dir,
+                    config_file=config_file,
+                    rename_mode=rename_mode,
+                    use_lowercase=use_lowercase,
+                    progress_callback=self._progress_callback,
+                )
+            else:
+                result = self.service.normalize_library_only(
+                    library_dir=library_dir,
+                    rename_mode=rename_mode,
+                    use_lowercase=use_lowercase,
+                    progress_callback=self._progress_callback,
+                )
 
             self._set_log(result.log_lines)
             self._refresh_history()
@@ -587,23 +635,16 @@ class DCSBPathFixerApp:
 
         except ValidationError as exc:
             self.status_text.set("Validation error.")
-            messagebox.showerror("Validation error", str(exc))
+            messagebox.showerror("Validation Error", str(exc))
         except ConfigReadError as exc:
             self.status_text.set("Read error.")
-            messagebox.showerror("Read error", str(exc))
+            messagebox.showerror("Read Error", str(exc))
         except ConfigWriteError as exc:
             self.status_text.set("Write error.")
-            messagebox.showerror("Write error", str(exc))
+            messagebox.showerror("Write Error", str(exc))
         except SettingsError as exc:
             self.status_text.set("Settings error.")
-            messagebox.showerror("Settings error", str(exc))
+            messagebox.showerror("Settings Error", str(exc))
         except Exception as exc:
             self.status_text.set("Unexpected error.")
-            messagebox.showerror("Unexpected error", str(exc))
-
-
-def run_app() -> None:
-    root = tk.Tk()
-    root.option_add("*tearOff", False)
-    DCSBPathFixerApp(root)
-    root.mainloop()
+            messagebox.showerror("Unexpected Error", str(exc))
