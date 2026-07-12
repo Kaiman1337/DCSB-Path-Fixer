@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.constants import SUPPORTED_AUDIO_EXTENSIONS, ProgressCallback
-from core.filename_normalizer import normalize_audio_stem
+from core.filename_normalizer import (
+    build_collision_stem,
+    normalize_audio_stem,
+    split_trailing_index,
+)
 from core.path_resolver import normalize_key
 
 
@@ -39,6 +43,38 @@ def build_audio_index(
     return index, total
 
 
+def _same_logical_numbered_name(original_stem: str, normalized_stem: str) -> bool:
+    original_base, original_index = split_trailing_index(original_stem)
+    normalized_base, normalized_index = split_trailing_index(normalized_stem)
+
+    if original_index is None:
+        return False
+    if normalized_index is None:
+        return False
+    if original_index != normalized_index:
+        return False
+
+    original_base_cmp = original_base.replace("-", " ").replace("_", " ").strip().lower()
+    normalized_base_cmp = normalized_base.replace("-", " ").replace("_", " ").strip().lower()
+
+    return original_base_cmp == normalized_base_cmp
+
+
+def _find_available_target(source: Path, normalized_stem: str, suffix: str, rename_mode: str) -> Path:
+    direct_target = source.with_name(f"{normalized_stem}{suffix}")
+
+    if not direct_target.exists() or str(direct_target).lower() == str(source).lower():
+        return direct_target
+
+    index = 1
+    while True:
+        candidate_stem = build_collision_stem(normalized_stem, rename_mode, index)
+        candidate = source.with_name(f"{candidate_stem}{suffix}")
+        if not candidate.exists() or str(candidate).lower() == str(source).lower():
+            return candidate
+        index += 1
+
+
 def rename_audio_files(
     library_dir: str,
     replacement: str,
@@ -67,34 +103,42 @@ def rename_audio_files(
         suffix = source.suffix
         normalized_stem = normalize_audio_stem(original_stem, replacement, use_lowercase)
 
-        if not normalized_stem or normalized_stem == original_stem:
+        if not normalized_stem:
             unchanged += 1
             continue
 
-        new_name = f"{normalized_stem}{suffix}"
-        target = source.with_name(new_name)
+        if normalized_stem == original_stem:
+            unchanged += 1
+            continue
+
+        if _same_logical_numbered_name(original_stem, normalized_stem):
+            unchanged += 1
+            continue
+
+        target = _find_available_target(source, normalized_stem, suffix, replacement)
         source_key = normalize_key(str(source))
 
         if str(target) == str(source):
             unchanged += 1
             continue
 
-        if target.exists():
-            if str(target).lower() == str(source).lower():
-                pass
-            else:
-                collisions += 1
-                rename_map[source_key] = str(target)
-                log(f"[SKIP][COLLISION] {source} -> {target}")
-                continue
+        if target.exists() and str(target).lower() != str(source).lower():
+            collisions += 1
+            log(f"[SKIP][COLLISION] {source} -> {target}")
+            continue
 
         old_path = str(source)
         source.rename(target)
         new_path = str(target)
 
+        if Path(new_path).stem != normalized_stem:
+            collisions += 1
+            log(f"[RENAMED][DUPLICATE] {Path(old_path).name} -> {target.name}")
+        else:
+            log(f"[RENAMED] {Path(old_path).name} -> {target.name}")
+
         renamed += 1
         rename_map[source_key] = new_path
         renamed_items.append({"old_path": old_path, "new_path": new_path})
-        log(f"[RENAMED] {Path(old_path).name} -> {target.name}")
 
     return renamed, unchanged, collisions, rename_map, renamed_items

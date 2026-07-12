@@ -10,13 +10,22 @@ from gui.constants import SUPPORTED_FORMATS_TEXT, VALID_RENAME_MODES
 from gui.dialogs import open_create_checkpoint_dialog, open_rename_checkpoint_dialog
 from gui.theme import DARK_BG, DARK_FG, setup_dark_theme
 
+from gui.flac_converter_tab import FlacConverterTab
+from gui.playlist_tab import PlaylistTab
+
 
 class DCSBPathFixerApp:
+    VIEW_SIZES = {
+        "path_fixer": "1040x760",
+        "playlist": "900x700",
+        "flac_converter": "900x620",
+    }
+
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("DCSB Config Path Fixer")
-        self.root.geometry("1040x760")
-        self.root.minsize(920, 660)
+        self.root.geometry(self.VIEW_SIZES["path_fixer"])
+        self.root.resizable(False, False)
 
         setup_dark_theme(self.root)
 
@@ -31,20 +40,76 @@ class DCSBPathFixerApp:
         self.status_text = tk.StringVar(value="Ready.")
         self.progress_value = tk.DoubleVar(value=0.0)
         self.selected_history_index = tk.IntVar(value=-1)
-
         self.use_config = tk.BooleanVar(value=True)
+        self.active_view = tk.StringVar(value="path_fixer")
 
         self.log_widget: tk.Text
         self.history_listbox: tk.Listbox
         self.history_details_widget: tk.Text
         self.missing_widget: tk.Text
 
+        self.path_fixer_view: ttk.Frame
+        self.playlist_host_view: ttk.Frame
+        self.flac_host_view: ttk.Frame
+
+        self.playlist_tab: PlaylistTab | None = None
+        self.flac_converter_tab: FlacConverterTab | None = None
+
         self._build_ui()
         self._load_settings_into_ui()
         self._bind_events()
+        self._show_view("path_fixer")
 
     def _build_ui(self) -> None:
-        container = ttk.Frame(self.root, padding=12)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
+
+        top_tabs_frame = ttk.Frame(self.root, padding=(12, 10, 12, 0))
+        top_tabs_frame.grid(row=0, column=0, sticky="ew")
+        top_tabs_frame.columnconfigure(0, weight=1)
+        top_tabs_frame.columnconfigure(1, weight=1)
+        top_tabs_frame.columnconfigure(2, weight=1)
+
+        self.path_fixer_tab_button = ttk.Button(
+            top_tabs_frame,
+            text="Path Fixer",
+            command=lambda: self._show_view("path_fixer"),
+        )
+        self.path_fixer_tab_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+
+        self.playlist_tab_button = ttk.Button(
+            top_tabs_frame,
+            text="Playlist Builder",
+            command=lambda: self._show_view("playlist"),
+        )
+        self.playlist_tab_button.grid(row=0, column=1, sticky="ew", padx=4)
+
+        self.flac_tab_button = ttk.Button(
+            top_tabs_frame,
+            text="FLAC -> MP3",
+            command=lambda: self._show_view("flac_converter"),
+        )
+        self.flac_tab_button.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+
+        view_host = ttk.Frame(self.root)
+        view_host.grid(row=1, column=0, sticky="nsew")
+        view_host.columnconfigure(0, weight=1)
+        view_host.rowconfigure(0, weight=1)
+
+        self.path_fixer_view = ttk.Frame(view_host)
+        self.playlist_host_view = ttk.Frame(view_host)
+        self.flac_host_view = ttk.Frame(view_host)
+
+        for frame in (self.path_fixer_view, self.playlist_host_view, self.flac_host_view):
+            frame.grid(row=0, column=0, sticky="nsew")
+            frame.grid_remove()
+
+        self._build_path_fixer_view()
+        self._build_playlist_view()
+        self._build_flac_view()
+
+    def _build_path_fixer_view(self) -> None:
+        container = ttk.Frame(self.path_fixer_view, padding=12)
         container.pack(fill="both", expand=True)
 
         ttk.Label(container, text="Audio library folder:").grid(row=0, column=0, sticky="w", pady=(0, 6))
@@ -70,8 +135,13 @@ class DCSBPathFixerApp:
         info_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 10))
 
         info_text = tk.Text(
-            info_frame, height=2, width=100, wrap="word",
-            bg=DARK_BG, fg=DARK_FG, insertbackground=DARK_FG,
+            info_frame,
+            height=2,
+            width=100,
+            wrap="word",
+            bg=DARK_BG,
+            fg=DARK_FG,
+            insertbackground=DARK_FG,
         )
         info_text.insert("1.0", SUPPORTED_FORMATS_TEXT)
         info_text.config(state="disabled")
@@ -107,7 +177,12 @@ class DCSBPathFixerApp:
         notebook.add(log_frame, text="Log Output")
 
         self.log_widget = tk.Text(
-            log_frame, height=16, wrap="word", bg=DARK_BG, fg=DARK_FG, insertbackground=DARK_FG,
+            log_frame,
+            height=16,
+            wrap="word",
+            bg=DARK_BG,
+            fg=DARK_FG,
+            insertbackground=DARK_FG,
         )
         self.log_widget.pack(fill="both", expand=True)
 
@@ -121,8 +196,13 @@ class DCSBPathFixerApp:
         scrollbar.pack(side="right", fill="y")
 
         self.history_listbox = tk.Listbox(
-            history_list_frame, yscrollcommand=scrollbar.set, height=16,
-            bg=DARK_BG, fg=DARK_FG, selectbackground="#505050", selectforeground=DARK_FG,
+            history_list_frame,
+            yscrollcommand=scrollbar.set,
+            height=16,
+            bg=DARK_BG,
+            fg=DARK_FG,
+            selectbackground="#505050",
+            selectforeground=DARK_FG,
         )
         self.history_listbox.pack(fill="both", expand=True)
         scrollbar.config(command=self.history_listbox.yview)
@@ -132,8 +212,13 @@ class DCSBPathFixerApp:
         history_detail_frame.pack(fill="both", expand=True, side="right", padx=4, pady=4)
 
         self.history_details_widget = tk.Text(
-            history_detail_frame, height=16, wrap="word", width=40,
-            bg=DARK_BG, fg=DARK_FG, insertbackground=DARK_FG,
+            history_detail_frame,
+            height=16,
+            wrap="word",
+            width=40,
+            bg=DARK_BG,
+            fg=DARK_FG,
+            insertbackground=DARK_FG,
         )
         self.history_details_widget.pack(fill="both", expand=True)
 
@@ -149,7 +234,12 @@ class DCSBPathFixerApp:
 
         ttk.Label(container, text="Files not found:").grid(row=6, column=0, sticky="w", pady=(4, 0))
         self.missing_widget = tk.Text(
-            container, height=8, wrap="word", bg=DARK_BG, fg=DARK_FG, insertbackground=DARK_FG,
+            container,
+            height=8,
+            wrap="word",
+            bg=DARK_BG,
+            fg=DARK_FG,
+            insertbackground=DARK_FG,
         )
         self.missing_widget.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(4, 8))
 
@@ -157,14 +247,80 @@ class DCSBPathFixerApp:
         status_frame.grid(row=8, column=0, columnspan=3, sticky="ew")
         status_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(status_frame, textvariable=self.status_text, relief="sunken", anchor="w").grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Label(status_frame, textvariable=self.status_text, relief="sunken", anchor="w").grid(
+            row=0, column=0, sticky="ew", padx=(0, 8)
+        )
 
-        progress_bar = ttk.Progressbar(status_frame, variable=self.progress_value, maximum=100, mode="determinate")
+        progress_bar = ttk.Progressbar(
+            status_frame,
+            variable=self.progress_value,
+            maximum=100,
+            mode="determinate",
+        )
         progress_bar.grid(row=0, column=1, sticky="ew")
 
         container.columnconfigure(1, weight=1)
         container.rowconfigure(5, weight=1)
         container.rowconfigure(7, weight=0)
+
+    def _build_playlist_view(self) -> None:
+        self.playlist_host_view.columnconfigure(0, weight=1)
+        self.playlist_host_view.rowconfigure(0, weight=1)
+
+        self.playlist_tab = PlaylistTab(
+            self.playlist_host_view,
+            status_callback=lambda text: self.status_text.set(text),
+            progress_callback=self._progress_callback,
+        )
+        self.playlist_tab.frame.grid(row=0, column=0, sticky="nsew")
+
+    def _build_flac_view(self) -> None:
+        self.flac_host_view.columnconfigure(0, weight=1)
+        self.flac_host_view.rowconfigure(0, weight=1)
+
+        self.flac_converter_tab = FlacConverterTab(
+            self.flac_host_view,
+            status_callback=lambda text: self.status_text.set(text),
+            progress_callback=self._progress_callback,
+        )
+        self.flac_converter_tab.frame.grid(row=0, column=0, sticky="nsew")
+
+    def _show_view(self, view_name: str) -> None:
+        self.active_view.set(view_name)
+
+        self.path_fixer_view.grid_remove()
+        self.playlist_host_view.grid_remove()
+        self.flac_host_view.grid_remove()
+
+        if view_name == "path_fixer":
+            self.path_fixer_view.grid()
+            self.root.title("DCSB Config Path Fixer")
+        elif view_name == "playlist":
+            self.playlist_host_view.grid()
+            self.root.title("Playlist Builder")
+        elif view_name == "flac_converter":
+            self.flac_host_view.grid()
+            self.root.title("FLAC -> MP3")
+        else:
+            return
+
+        self.root.geometry(self.VIEW_SIZES.get(view_name, self.VIEW_SIZES["path_fixer"]))
+        self.root.resizable(False, False)
+        self._update_tab_button_states()
+
+    def _update_tab_button_states(self) -> None:
+        active = self.active_view.get()
+
+        self.path_fixer_tab_button.state(["!disabled"])
+        self.playlist_tab_button.state(["!disabled"])
+        self.flac_tab_button.state(["!disabled"])
+
+        if active == "path_fixer":
+            self.path_fixer_tab_button.state(["disabled"])
+        elif active == "playlist":
+            self.playlist_tab_button.state(["disabled"])
+        elif active == "flac_converter":
+            self.flac_tab_button.state(["disabled"])
 
     def _toggle_config_field(self) -> None:
         state = "normal" if self.use_config.get() else "disabled"

@@ -58,6 +58,26 @@ def normalize_audio_stem(stem: str, rename_mode: str, use_lowercase: bool = Fals
     return text
 
 
+def build_collision_stem(base_stem: str, rename_mode: str, index: int) -> str:
+    if rename_mode == "-":
+        return f"{base_stem}-({index})"
+    if rename_mode == "_":
+        return f"{base_stem}_({index})"
+    if rename_mode == "space":
+        return f"{base_stem} ({index})"
+    return f"{base_stem} ({index})"
+
+
+def split_trailing_index(stem: str) -> tuple[str, int | None]:
+    match = re.match(r"^(.*?)(?:[\s\-_]\((\d+)\)|[\s\-_](\d+)|\((\d+)\))$", stem.strip())
+    if not match:
+        return stem, None
+
+    base = match.group(1).strip(" -_")
+    number = match.group(2) or match.group(3) or match.group(4)
+    return base, int(number) if number is not None else None
+
+
 def generate_name_variants(filename: str, use_lowercase: bool = False) -> list[str]:
     path = Path(filename)
     stem = path.stem
